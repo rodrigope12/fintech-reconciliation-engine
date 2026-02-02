@@ -1,0 +1,291 @@
+\documentclass[11pt, a4paper]{article}
+
+% --- Configuración Global ---
+\usepackage[utf8]{inputenc}
+\usepackage[spanish, es-tabla]{babel}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+
+% --- Matemáticas y Algoritmos ---
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{mathtools}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+% --- Gráficos y Código ---
+\usepackage{tikz}
+\usetikzlibrary{shapes,arrows,positioning,calc,fit,shadows}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{fancyhdr}
+\usepackage{hyperref}
+
+% --- Estilos de Código ---
+\definecolor{codegreen}{rgb}{0,0.5,0}
+\definecolor{codeblue}{rgb}{0.0,0.3,0.7}
+\definecolor{backcolour}{rgb}{0.97,0.97,0.98}
+\definecolor{codeorange}{rgb}{0.8,0.4,0}
+
+\lstdefinestyle{techspec}{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{codeblue}\bfseries,
+    ndkeywordstyle=\color{codeorange}\bfseries,
+    numberstyle=\tiny\color{gray},
+    basicstyle=\ttfamily\footnotesize,
+    breaklines=true,                 
+    frame=single,
+    rulecolor=\color{gray!20},
+    captionpos=b,
+    showstringspaces=false
+}
+\lstset{style=techspec}
+
+% --- Encabezados ---
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\textbf{Deep-Accountant Core}}
+\lhead{Arquitectura Jerárquica / Linealizada}
+\cfoot{\thepage}
+
+\title{
+    \vspace{-2cm}
+    \textbf{\huge Especificación Técnica: Motor de Conciliación Determinista V3.0}\\
+    \large Arquitectura de Cascada: Optimización Lexicográfica \& Particionamiento Conexo
+}
+\author{\textbf{División de Ingeniería de Sistemas Financieros}}
+\date{Enero 2026 | Release Candidate (Production Ready)}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Este documento define la arquitectura de referencia para sistemas de conciliación financiera de ultra-baja latencia y precisión absoluta. El diseño implementa una estrategia de \textbf{"Safe Peeling"} con ventanas deslizantes para la reducción de entropía, seguida de un núcleo de \textbf{Programación Lineal Entera Mixta (MILP)} con optimización jerárquica (Lexicográfica). El sistema elimina la dependencia de pesos arbitrarios (Big-M) priorizando estrictamente la integridad contable sobre la similitud semántica, garantizando convergencia determinista sin falsos positivos financieros.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Principios Axiomáticos del Sistema}
+
+La arquitectura impone cuatro restricciones duras para garantizar convergencia matemática y seguridad contable.
+
+\begin{enumerate}
+    \item \textbf{Peeling Conservador con Buffer (Rolling Safe-Harbor):} La optimización voraz (Greedy) está prohibida en los límites de las ventanas temporales. Se utiliza un buffer de estado ("Overlap Zone") para evitar falsos negativos por cortes de fecha arbitrarios.
+    \item \textbf{Prioridad Lexicográfica (Hierarchical Solvability):} La integridad financiera y la similitud semántica no son intercambiables. El sistema resuelve primero el balance contable ($\Delta \to 0$) y, dentro del espacio de soluciones óptimas financieras, maximiza la coherencia semántica.
+    \item \textbf{Topología de Flujo Conexo:} La división del problema (clustering) no se basa en modularidad semántica, sino en \textbf{viabilidad de flujo financiero}. No se permite cortar aristas que puedan constituir la única ruta de liquidación de una partida (Componentes Conexos).
+    \item \textbf{Linealidad Estricta (Pure MILP):} Se prohíbe el uso de funciones objetivo cuadráticas. Toda penalización se modela mediante variables auxiliares lineales para asegurar estabilidad numérica y velocidad de ejecución.
+\end{enumerate}
+
+\section{Pipeline de Procesamiento}
+
+\subsection{Fase 0: Pre-Procesamiento Seguro (Rolling Window Peeling)}
+Para minimizar la carga en el motor MILP sin introducir "Greedy Theft" ni errores de borde temporal:
+\begin{itemize}
+    \item \textbf{Ventana Activa:} Se procesa el periodo $T$ más un buffer $T + \Delta_{overlap}$ (ej. 5 días).
+    \item \textbf{Match 1:1 ID Externo:} Coincidencia perfecta de ID bancario o referencia única (UUID).
+    \item \textbf{Match 1:1 Único Local:} Coincidencia de (Monto + Contraparte) si y solo si el monto es \textbf{único} en todo el rango expandido ($T \pm \Delta_{overlap}$).
+    \item \textbf{Commit Diferido:} Las coincidencias encontradas dentro del buffer de superposición no se confirman hasta la ejecución de la siguiente ventana principal.
+\end{itemize}
+
+\subsection{Fase 1: Grafos de Verosimilitud en Cascada}
+Los elementos residuales se modelan en un grafo $G=(V,E)$ construido iterativamente:
+\begin{enumerate}
+    \item \textbf{Pase 1 (Alta Confianza):} Aristas estrictas con decaimiento rápido ($|t_i - t_j| < 30$ días).
+    \item \textbf{Pase 2 (Residual):} Expansión temporal hasta $\Delta T_{max}$ (ej. 90 días) con penalización en el peso $W_{ij}$.
+\end{enumerate}
+
+$$ W_{ij} = \text{Score}_{\text{NLP}}(i, j) \cdot \frac{1}{1 + \alpha \cdot |t_i - t_j|} $$
+
+\subsection{Fase 2: Particionamiento por Componentes Conexos}
+A diferencia de la detección de comunidades estándar (Leiden/Louvain) que puede aislar una factura de su pago por baja similitud textual, este sistema utiliza:
+\begin{enumerate}
+    \item \textbf{Componentes Conexos:} Se identifican islas de transacciones interconectadas.
+    \item \textbf{Poda de Aristas Débiles:} Si un componente excede el tamaño tratable ($N > 500$), se eliminan iterativamente las aristas con $W_{ij} < \tau$ hasta fracturar el grafo, asegurando no aislar nodos con grado 1 (unicidad de ruta).
+\end{enumerate}
+
+\section{Motor de Resolución: MILP Jerárquico}
+
+El núcleo utiliza optimización multi-objetivo lexicográfica. Esto evita la inestabilidad numérica de los métodos "Big-M" y garantiza que nunca se sacrifique dinero por texto.
+
+\subsection{Variables de Decisión}
+\begin{itemize}
+    \item $x_i, y_j \in \{0,1\}$: Selección binaria de Facturas ($i$) y Pagos ($j$).
+    \item $\delta \in \mathbb{R}$: Variable de desviación (Slack con signo).
+    \item $\delta_{abs} \in \mathbb{R}^+$: Variable auxiliar para el valor absoluto del error.
+\end{itemize}
+
+\subsection{Jerarquía de Objetivos (Lexicographical Objectives)}
+
+El solver resuelve secuencialmente dos problemas, pasando el valor óptimo del primero como restricción al segundo.
+
+\textbf{Nivel 1 (Prioridad Crítica - Financiera):}
+Minimizar estrictamente el error contable.
+$$ \min Z_1 = \delta_{abs} $$
+Sujeto a:
+$$ \sum (x_i A_i) - \sum (y_j A_j) + \delta = 0 $$
+$$ \delta_{abs} \ge \delta, \quad \delta_{abs} \ge -\delta $$
+$$ \delta_{abs} \le \Omega_{\text{HardCap}} \quad (\text{Ej. 0.05 unidades monetarias}) $$
+
+\textbf{Nivel 2 (Prioridad Secundaria - Semántica):}
+Maximizar la similitud semántica, dado que el error financiero ya es mínimo.
+$$ \max Z_2 = \sum_{(i,j) \in E} (z_{ij} \cdot W_{ij}) $$
+Sujeto a:
+$$ \delta_{abs} = Z_1^* \quad (\text{El error financiero se fija al óptimo hallado}) $$
+
+\section{Orquestación del Algoritmo}
+
+\begin{algorithm}
+\caption{Orquestación V3.0: Lexicographic MILP Core}
+\begin{algorithmic}[1]
+\State \textbf{Input:} Ledger $L$, Config $C$
+\State \textbf{Output:} Matched Entries $M$
+
+\State \textcolor{codeblue}{\emph{// Fase 0: Peeling con Ventana Deslizante}}
+\State $M_{safe} \gets \text{ExecuteRollingPeeling}(L, \text{BufferDays}=5)$
+\State $L.\text{Commit}(M_{safe})$
+\State $L_{remain} \gets L - M_{safe}$
+
+\State \textcolor{codeblue}{\emph{// Bucle de Cascada}}
+\For{$\text{Window} \in [30d, 90d]$}
+    \State $G \gets \text{BuildLikelihoodGraph}(L_{remain}, \text{Window})$
+    
+    \State \textcolor{codeblue}{\emph{// Particionamiento Seguro (No Modularidad)}}
+    \State $SubGraphs \gets \text{ConnectedComponents}(G)$
+    \If{$\max(\text{Size}(SubGraphs)) > \text{Limit}$}
+        \State $SubGraphs \gets \text{MinCutPartitioning}(G, \text{PreserveFlow}=\text{True})$
+    \EndIf
+    
+    \For{$S$ in $SubGraphs$}
+        \State $Model \gets \text{InitGurobiModel}(S)$
+        
+        \State \textcolor{codeblue}{\emph{// Definición Objetivos Jerárquicos}}
+        \State $Model.\text{SetObjectiveN}(\text{expr}=\delta_{abs}, \text{priority}=2, \text{index}=0)$
+        \State $Model.\text{SetObjectiveN}(\text{expr}=-\text{SemScore}, \text{priority}=1, \text{index}=1)$
+        
+        \State $Model.\text{Optimize}()$
+        
+        \If{$Model.\text{Status} == \text{OPTIMAL}$}
+            \State $L.\text{Commit}(Model.\text{Solution})$
+        \EndIf
+    \EndFor
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+\newpage
+\section{Implementación del Solver (Especificación Python/Gurobi)}
+
+Esta implementación utiliza la API jerárquica nativa para evitar problemas de escala entre el valor monetario y el score semántico.
+
+\begin{lstlisting}[language=Python, caption=MILP Core V3.0: Hierarchical Optimization]
+def solve_v30_lexicographic(cluster, config):
+    # Entorno productivo de alta estabilidad
+    m = Model("DeepRecon_V3_Lexico")
+    m.setParam('TimeLimit', 30)       
+    m.setParam('MIPGap', 0.0)         # Precision absoluta requerida
+    m.setParam('IntegralityFocus', 1) # Evita errores de redondeo
+    
+    # Constantes
+    HARD_CAP_MONETARY = 0.05  # Tolerancia maxima (centavos por cambio divisa)
+    
+    # --- Variables ---
+    x = {i.id: m.addVar(vtype=GRB.BINARY, name=f"Inv_{i.id}") for i in cluster.invoices}
+    y = {p.id: m.addVar(vtype=GRB.BINARY, name=f"Pay_{p.id}") for p in cluster.payments}
+    
+    # Variables de emparejamiento explicito (para sumar scores)
+    z = {} 
+    for i in cluster.invoices:
+        for j in cluster.payments:
+             if (i.id, j.id) in cluster.edges:
+                 z[i.id, j.id] = m.addVar(vtype=GRB.BINARY)
+                 # Logical constraint: z_ij solo es 1 si x_i y y_j son 1
+                 m.addConstr(z[i.id, j.id] <= x[i.id])
+                 m.addConstr(z[i.id, j.id] <= y[j.id])
+
+    # Slack Linealizado
+    slack = m.addVar(lb=-HARD_CAP_MONETARY, ub=HARD_CAP_MONETARY, name="Slack_Real")
+    abs_slack = m.addVar(lb=0.0, ub=HARD_CAP_MONETARY, name="Slack_Abs")
+    
+    m.addConstr(abs_slack >= slack)
+    m.addConstr(abs_slack >= -slack)
+
+    # --- Restriccion Maestra de Balance ---
+    net_flow = quicksum(x[i]*inv.amt for i, inv in ...) - \
+               quicksum(y[j]*pay.amt for j, pay in ...)
+    m.addConstr(net_flow + slack == 0, "ZeroSumBalance")
+
+    # --- OBJETIVOS JERARQUICOS (Lexicograficos) ---
+    
+    # Prioridad 2 (Alta): Minimizar Error Financiero
+    # El solver optimizara esto primero, ignorando la semantica.
+    m.setObjectiveN(abs_slack, index=0, priority=2, name="FinancialIntegrity")
+
+    # Prioridad 1 (Baja): Maximizar Score Semantico
+    # El solver maximizara esto SIN empeorar el resultado del Objetivo 0.
+    semantic_score = quicksum(z[i,j] * w[i,j] for i,j in cluster.edges)
+    # Nota: Gurobi minimiza por defecto, usamos signo negativo para maximizar
+    m.setObjectiveN(-semantic_score, index=1, priority=1, name="SemanticMaximization")
+
+    m.optimize()
+    return parse_hierarchical_result(m)
+\end{lstlisting}
+
+\section{Arquitectura de Flujo de Datos Optimizado}
+
+El diagrama refleja la integración de la validación por buffer y la optimización jerárquica.
+
+\begin{center}
+\begin{tikzpicture}[node distance=2cm, auto]
+    % Estilos
+    \tikzstyle{block} = [rectangle, draw, fill=blue!5, text width=8em, text centered, rounded corners, minimum height=3em, drop shadow, font=\scriptsize]
+    \tikzstyle{process} = [rectangle, draw, fill=orange!5, text width=9em, text centered, rounded corners, minimum height=3em, drop shadow, font=\scriptsize]
+    \tikzstyle{decision} = [diamond, draw, fill=green!5, text width=5em, text centered, drop shadow, font=\scriptsize]
+    \tikzstyle{line} = [draw, -latex', thick]
+
+    % Nodos
+    \node [block] (input) {Raw Ledger};
+    
+    % Fase 0
+    \node [process, below of=input, node distance=2.5cm] (buffer) {Rolling Window Buffer};
+    \node [decision, below of=buffer, node distance=2.5cm] (peeling) {Safe Peeling};
+    \node [block, right of=peeling, node distance=3.5cm] (fast_commit) {Buffer Commit};
+    
+    % Fase 1 (Cascada)
+    \node [process, below of=peeling, node distance=3cm] (graph) {Conn. Components Graph};
+    
+    % Fase 2
+    \node [process, below of=graph, node distance=2cm] (milp) {Lexicographic MILP};
+    \node [right of=milp, node distance=3.5cm, font=\tiny, text width=6em] (milp_note) {\textit{1. Min Error}\\ \textit{2. Max Score}};
+    
+    % Salida
+    \node [decision, below of=milp, node distance=2.5cm] (chk) {Optimal?};
+    \node [block, right of=chk, node distance=3.5cm] (final_commit) {Final Commit};
+    \node [block, left of=chk, node distance=3cm] (manual) {Exception Queue};
+
+    % Conexiones
+    \path [line] (input) -- (buffer);
+    \path [line] (buffer) -- (peeling);
+    \path [line] (peeling) -- node [above] {Unique} (fast_commit);
+    \path [line] (peeling) -- node [left] {Complex} (graph);
+    
+    \path [line] (fast_commit) |- (graph);
+    \path [line] (graph) -- (milp);
+    \path [line] (milp_note) -- (milp);
+    \path [line] (milp) -- (chk);
+    
+    \path [line] (chk) -- node [above] {Yes} (final_commit);
+    \path [line] (chk) -- node [above] {No} (manual);
+    
+    % Bucle de cascada implícito en lógica de grafo
+    \path [line] (manual.north) |- node [near end, above] {Retry Wider Window} (graph.west);
+
+\end{tikzpicture}
+\end{center}
+
+\end{document}|

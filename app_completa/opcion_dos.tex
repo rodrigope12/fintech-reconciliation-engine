@@ -1,0 +1,366 @@
+\documentclass[11pt, a4paper]{article}
+
+% --- Configuración Global ---
+\usepackage[utf8]{inputenc}
+\usepackage[spanish, es-tabla]{babel}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+
+% --- Matemáticas y Algoritmos ---
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{mathtools}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+% --- Gráficos y Código ---
+\usepackage{tikz}
+\usetikzlibrary{shapes,arrows,positioning,calc,fit,shadows}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{fancyhdr}
+\usepackage{hyperref}
+
+% --- Estilos de Código ---
+\definecolor{codegreen}{rgb}{0,0.5,0}
+\definecolor{codeblue}{rgb}{0.0,0.3,0.7}
+\definecolor{backcolour}{rgb}{0.97,0.97,0.98}
+\definecolor{codeorange}{rgb}{0.8,0.4,0}
+
+\lstdefinestyle{techspec}{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{codeblue}\bfseries,
+    ndkeywordstyle=\color{codeorange}\bfseries,
+    numberstyle=\tiny\color{gray},
+    basicstyle=\ttfamily\footnotesize,
+    breaklines=true,                
+    frame=single,
+    rulecolor=\color{gray!20},
+    captionpos=b,
+    showstringspaces=false
+}
+\lstset{style=techspec}
+
+% --- Encabezados ---
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\textbf{Deep-Accountant Core}}
+\lhead{Arquitectura Unificada / V9.0 Final}
+\cfoot{\thepage}
+
+\title{
+    \vspace{-2cm}
+    \textbf{\huge Especificación Técnica: Motor de Conciliación Híbrido V9.0}\\
+    \large Safe-Peeling, Clustering Modular (Leiden) y MILP Linealizado
+}
+\author{\textbf{División de Ingeniería de Sistemas Financieros}}
+\date{Enero 2026 | Production Standard}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Este documento define la arquitectura definitiva para sistemas de conciliación financiera "Zero-Error". La metodología fusiona la integridad del \textbf{"Safe Peeling"} (verificación de unicidad local) con la robustez del \textbf{Clustering Modular (Leiden)} para la segmentación de grafos. El núcleo de resolución emplea un modelo MILP estrictamente lineal con variables de holgura estratificadas, garantizando que ninguna ambigüedad numérica (duplicidad de montos) sea resuelta por heurísticas voraces, eliminando efectivamente el riesgo de "Greedy Theft" y la formación de componentes gigantes ("Hairball Effect").
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Principios Axiomáticos del Sistema}
+
+La arquitectura V9.0 establece cuatro invariantes de diseño para entornos financieros críticos, asegurando consistencia matemática y escalabilidad.
+
+\begin{enumerate}
+    \item \textbf{Anti-Greedy Theft (Unicidad Local):} Está prohibido el emparejamiento determinista basado únicamente en montos si existen colisiones en la ventana temporal ($Count(Amount)_{\Delta t} > 1$). La ambigüedad numérica fuerza la delegación al solver semántico para evitar falsos positivos por coincidencia azarosa.
+    \item \textbf{Linealidad Estricta (Linearized MILP):} Se prohíbe el uso de funciones objetivo cuadráticas (MIQP). Las penalizaciones se modelan mediante variables auxiliares lineales ($|x| \to x_{aux} \ge x, x_{aux} \ge -x$) para asegurar estabilidad numérica y aprovechar la velocidad del algoritmo Simplex Dual.
+    \item \textbf{Segmentación Modular (Leiden):} En lugar de simples componentes conexos, se utiliza el algoritmo de \textbf{Leiden} para detectar comunidades densas. Esto previene que una sola coincidencia errónea fusione clústeres disjuntos y garantiza particiones manejables ($N < 100$).
+    \item \textbf{Seguridad Relativa (Relative Safety Cap):} La tolerancia ($\delta$) es dinámica y bifásica. Debe cumplir $\delta \le \text{MaxCap}$ (absoluto) Y $\delta \le \alpha \cdot \text{TotalPayment}$ (relativo), impidiendo la absorción de deudas reales como ajustes técnicos.
+\end{enumerate}
+
+
+\section{Subsistema de Ingesta: Validación Topológica y Algebraica}
+
+Para garantizar la viabilidad del modelo MILP sin configuración manual ("Template-Free"), la fase de ingesta opera bajo una filosofía \textbf{"Zero-Trust"}. No se asume la integridad del documento entrante; se verifica matemáticamente.
+
+Se implementa una arquitectura de \textbf{Descubrimiento Topológico Asistido}, donde la estructura del documento se trata como una incógnita $(X, \pi, \sigma, s)$ que debe satisfacer ecuaciones de recurrencia contable estrictas. El objetivo es $\text{FPR} \equiv 0$ (Cero Falsos Positivos) antes de que cualquier dato toque el motor de conciliación.
+
+\subsection{Ingesta Bancaria: Validación por Ecuaciones en Diferencias Finitas}
+
+Los archivos PDF se procesan en un espacio de coordenadas discreto. A diferencia de enfoques visuales puros, este sistema valida la extracción resolviendo la relación de recurrencia del saldo acumulado.
+
+\subsubsection{1. Anclaje Temporal y Scope de Página (Page-Scoped Date Imputation)}
+Los extractos bancarios omiten fechas en transacciones consecutivas ("Sparse Dates"). La imputación simple es riesgosa en cambios de página. Se aplica una función de \textbf{Imputación Controlada ($\Phi$)}:
+
+Sea $d_{t,p}$ el valor de fecha en la fila $t$ de la página $p$. Se define el vector imputado $\hat{d}$ como:
+\begin{equation}
+ \hat{d}_{t,p} = 
+ \begin{cases} 
+ d_{t,p} & \text{si } d_{t,p} \neq \emptyset \\ 
+ \hat{d}_{t-1,p} & \text{si } d_{t,p} = \emptyset \land \text{IsTx}(t) \land p_t = p_{t-1} \\
+ \text{\texttt{NULL}} & \text{si } d_{t,p} = \emptyset \land p_t \neq p_{t-1} \quad (\text{Reset por Salto de Pág.})
+ \end{cases} 
+\end{equation}
+Esta restricción impide la propagación errónea de fechas a través de encabezados o saltos de página no detectados.
+
+\subsubsection{2. Validación de Recurrencia y Filtrado de Ruido ($s_t$)}
+Se introduce una variable selectora binaria $s_t \in \{0, 1\}$ donde $1$ indica una transacción válida y $0$ ruido. El sistema busca la permutación de columnas $\pi$ que satisfaga la \textbf{Ecuación en Diferencias del Saldo} para la secuencia máxima de filas:
+
+\begin{equation}
+    \forall t \in T_{active}: \quad s_t \cdot \left( B_t - B_{t-1} - \sigma(C_t - D_t) \right) = 0
+\end{equation}
+
+Donde:
+\begin{itemize}
+    \item $B_t, B_{t-1}$: Saldo actual y previo.
+    \item $C_t, D_t$: Valores candidatos para Crédito y Débito bajo la permutación $\pi$.
+    \item $\sigma \in \{1, -1\}$: Polaridad detectada de la operación.
+\end{itemize}
+Si la densidad de satisfacción $\frac{\sum s_t}{N} < \tau_{min}$, el documento se rechaza automáticamente como \texttt{STRUCTURAL\_FAILURE}, protegiendo al Core de basura inestructurada.
+
+\subsubsection{3. Reconstrucción Conservadora (Virtual Shadow Record)}
+Para manejar errores de OCR sin corromper la integridad contable, se prohíbe la modificación directa ("In-Place Mutation"). Se implementa un modelo de \textbf{Corrección Acotada}:
+
+Una discrepancia local solo genera una "Sombra Virtual" ($h^*$) si cumple tres condiciones de seguridad:
+\begin{enumerate}
+    \item \textbf{Cierre Algebraico:} $h^*$ resuelve la ecuación de diferencia en $t$.
+    \item \textbf{Similitud Visual:} La distancia de edición ponderada por la matriz de confusión OCR es mínima ($P_{ocr}(Raw_t \to h^*) > \gamma_{high}$).
+    \item \textbf{Invarianza de Magnitud:} $\lfloor \log_{10}(h^*) \rfloor \equiv \lfloor \log_{10}(Raw_t) \rfloor$. Se prohíbe estrictamente añadir o quitar dígitos que alteren el orden de magnitud (ej. prohibido corregir $10 \to 100$).
+\end{enumerate}
+
+\subsubsection{4. Continuidad de Frontera (Inter-Page Link)}
+Para garantizar que no existen páginas faltantes ocultas, se valida la continuidad del saldo entre fronteras de página:
+$$ B_{\text{inicial}}^{(p+1)} \equiv B_{\text{final}}^{(p)} $$
+Cualquier violación de esta igualdad provoca un "Hard Stop" del proceso, requiriendo intervención humana para evitar la conciliación sobre datos incompletos.
+
+\subsection{Ingesta ERP: Normalización Semántica}
+El flujo estructurado (Libro Mayor) requiere alineación vectorial:
+\begin{itemize}
+    \item \textbf{Vectorización de Entidades:} Los nombres de contrapartes se convierten a embeddings densos.
+    \item \textbf{Detección de Reversiones:} Identificación heurística de anulaciones ($A, -A$) para pre-agruparlas y reducir la dimensionalidad antes de la Fase 0.
+\end{itemize}
+
+\subsection{Proyección al Espacio Entero ($\mathbb{Z}_k$)}
+Para garantizar la estabilidad numérica del algoritmo Simplex (Sección 4), se elimina el punto flotante (IEEE 754). Se aplica una transformación biyectiva basada en la precisión de la moneda $k$:
+
+\begin{equation}
+    f_{norm}(x, k) : \mathbb{R} \to \mathbb{Z} \quad \mid \quad x \mapsto \text{round}(x \cdot 10^k)
+\end{equation}
+
+Todas las restricciones del modelo MILP ($ \sum x - \sum y = 0 $) operan en este espacio exacto. Esto permite distinguir discrepancias de $10^{-k}$ unidades (errores de redondeo) de errores reales, eliminando el ruido numérico en la optimización.
+
+\section{Pipeline de Procesamiento en Cascada}
+
+La eficiencia se logra mediante la reducción progresiva de la entropía del dataset.
+
+\subsection{Fase 0: Safe Peeling (Tamizado Seguro)}
+A diferencia de un Hash Map simple, este proceso verifica la cardinalidad antes de actuar.
+\begin{itemize}
+    \item \textbf{Match ID:} Coincidencia exacta de Referencia Bancaria $\to$ Commit Inmediato.
+    \item \textbf{Match Monto Seguro:} Si $Amount = X$ y $Count(X)_{\text{window}} == 1$, entonces Commit.
+    \item \textbf{Resultado:} Si hay 2 facturas de \$100 y 1 pago de \$100, el sistema \textbf{NO} actúa en Fase 0, protegiendo la integridad contable.
+\end{itemize}
+
+\subsection{Fase 1: Solver Multi-Pase (Expanding Horizon)}
+Se ejecutan iteraciones del solver ILP con horizontes temporales crecientes para reducir la complejidad del grafo final.
+\begin{enumerate}
+    \item \textbf{Pase Corto:} Ventana $\pm 5$ días, alta exigencia de similitud ($w > 0.9$).
+    \item \textbf{Pase Largo:} Ventana $\pm 30$ días, exigencia media, aplicado solo a remanentes.
+\end{enumerate}
+
+\subsection{Fase 2: Grafo Disperso y Particionamiento Leiden}
+Para el remanente histórico ("Long Tail"), se evita la explosión combinatoria:
+\begin{itemize}
+    \item \textbf{Topología k-NN:} Cada nodo se conecta máximo a sus $k=5$ vecinos más probables semánticamente.
+    \item \textbf{Corte Modular:} Se aplica el algoritmo de Leiden para maximizar la modularidad $Q$. Esto separa sub-problemas densos que estarían unidos por aristas débiles en un enfoque de componentes conexos tradicional.
+\end{itemize}
+
+\section{Motor de Resolución: MILP Linealizado}
+
+El modelo matemático combina la dispersión de variables (Sparse Matrix) con la linealización explícita del error para mantener el problema en clase P.
+
+\subsection{Definición de Variables}
+Definimos el conjunto de aristas activas $E_{sem} = \{ (i,j) \mid w_{ij} \ge \tau_{cut} \}$ para evitar matrices densas.
+\begin{itemize}
+    \item $x_i, y_j \in \{0,1\}$: Selección binaria de Facturas ($i$) y Pagos ($j$).
+    \item $z_{ij} \in \{0,1\}$: Variable de enlace efectiva, definida solo para $(i,j) \in E_{sem}$.
+    \item $\delta \in \mathbb{R}$: Variable de desviación con signo.
+    \item $\delta_{abs} \in \mathbb{R}_{\ge 0}$: Variable auxiliar para valor absoluto.
+\end{itemize}
+
+\subsection{Modelo Matemático}
+
+\textbf{1. Restricción Maestra (Balance)}
+$$ \sum_{i \in U} (x_i A_i) - \sum_{j \in V} (y_j A_j) + \delta = 0 $$
+
+\textbf{2. Linealización (Pure Linear Constraints)}
+$$ \delta_{abs} \ge \delta, \quad \delta_{abs} \ge -\delta $$
+
+\textbf{3. Seguridad Estratificada (Safety Check)}
+La holgura no puede superar el tope global ni un porcentaje del volumen transaccionado.
+$$ \delta_{abs} \le \min(\text{MAX\_CAP}, \,\, \alpha \cdot \sum_{j \in V} y_j A_j) $$
+Donde $\alpha \approx 0.01$ (1\%).
+
+\textbf{4. Función Objetivo}
+Maximizamos evidencia semántica y minimizamos el error absoluto linealizado.
+$$ \max Z = \sum_{(i,j) \in E_{sem}} (z_{ij} \cdot w_{ij}) - (\Omega \cdot \delta_{abs}) + (\beta \sum (x_i + y_j)) $$
+
+\section{Orquestación Algorítmica}
+
+\begin{algorithm}
+\caption{Core V9.0: Safe-Peeling & Leiden Clustering}
+\begin{algorithmic}[1]
+\State \textbf{Input:} Ledger $L$
+\State $L_{int} \gets \text{Ingest}(L)$
+
+\State \textcolor{codeblue}{\emph{// TIER 0: Safe Peeling (Uniqueness Check)}}
+\State $Groups \gets \text{GroupBy}(L_{int}, \text{Key}=\{Amount, Date, Ref\})$
+\For{$g \in Groups$}
+    \If{$g.\text{Count} == 2$ \textbf{and} $g.\text{IsBalanced}(1 \text{ vs } 1)$}
+        \State \textcolor{codeorange}{\emph{// Solo hacemos match si es único en la ventana temporal}}
+        \If{$\text{CheckLocalUniqueness}(g.\text{Amount}, \text{Window}=\pm 2d)$}
+             \State $L_{int}.\text{AtomicCommit}(g)$
+        \EndIf
+    \EndIf
+\EndFor
+
+\State \textcolor{codeblue}{\emph{// TIER 1: Multi-Pass Cascade}}
+\For{$Horizon \in [10d, 45d]$}
+    \State $Windows \gets \text{SlidingWindow}(L_{int}.\text{OpenItems}, Horizon)$
+    \State $\text{SolveILP}(Windows, \text{Strictness}=\text{High})$
+\EndFor
+
+\State \textcolor{codeblue}{\emph{// TIER 2: Modular Graph Partitioning}}
+\State $Orphans \gets L_{int}.\text{FetchOpen}()$
+\State $G \gets \text{BuildSparseGraph}(Orphans, k=5)$ \Comment{k-NN Topology}
+
+\State \textcolor{codeorange}{\emph{// Algoritmo Leiden para maximizar modularidad y cortar 'Hairballs'}}
+\State $Communities \gets \text{LeidenAlgorithm}(G, \text{Resolution}=1.0)$
+
+\For{$Comm \in Communities$}
+    \If{$Comm.\text{Size} < 80$}
+        \State $\text{SolveILP\_Linear}(Comm, \text{Safety}=\text{RelativeStratified})$
+    \Else
+        \State $\text{HeuristicFallback}(Comm)$
+    \EndIf
+\EndFor
+
+\end{algorithmic}
+\end{algorithm}
+
+\newpage
+\section{Implementación del Solver (Python/HiGHS)}
+
+La implementación refleja la linealización explícita y la generación de restricciones utilizando la librería \textbf{Python-MIP} configurada con el motor \textbf{HiGHS}, manteniendo el problema en clase P y optimizando memoria.
+
+\begin{lstlisting}[language=Python, caption=ILP Core V9.0: Linearized & Stratified (HiGHS Backend)]
+from mip import Model, xsum, BINARY, CONTINUOUS, MAXIMIZE, OptimizationStatus
+
+def solve_v9_ultimate(cluster_items, config):
+    # Inicializacion con Solver HiGHS explico
+    m = Model(name="DeepRecon_V9", solver_name='HIGHS')
+    m.verbose = 0
+    m.max_gap = 0.0           # Equivalente a MIPGap 0.0
+    m.max_seconds = 30        # Equivalente a TimeLimit
+    
+    # Constantes de Seguridad
+    MAX_ABS_CAP = config.max_tolerance_cents 
+    REL_TOL_RATIO = 0.01 # 1% Safety Ratio
+
+    invoices = [i for i in cluster_items if i.type == 'INV']
+    payments = [p for p in cluster_items if p.type == 'PAY']
+
+    # --- Variables de Decision ---
+    x = {i.id: m.add_var(var_type=BINARY) for i in invoices}
+    y = {p.id: m.add_var(var_type=BINARY) for p in payments}
+    
+    # Slack Linealizado
+    delta = m.add_var(lb=-MAX_ABS_CAP, ub=MAX_ABS_CAP, var_type=CONTINUOUS)
+    delta_abs = m.add_var(lb=0, ub=MAX_ABS_CAP, var_type=CONTINUOUS)
+    
+    # 1. Linealizacion Explicita (Mantiene el modelo lineal puro)
+    m.add_constr(delta_abs >= delta)
+    m.add_constr(delta_abs >= -delta)
+
+    # 2. Balance Maestro
+    sum_inv = xsum(x[i.id] * i.amount for i in invoices)
+    sum_pay = xsum(y[p.id] * p.amount for p in payments)
+    m.add_constr(sum_inv - sum_pay + delta == 0)
+
+    # 3. Seguridad Estratificada (Stratified Cap)
+    # Evita que el slack absorba facturas enteras pequenias
+    m.add_constr(delta_abs <= sum_pay * REL_TOL_RATIO)
+
+    # --- Funcion Objetivo Dispersa ---
+    obj_score = 0
+    # Solo aristas fuertes (Logica k-NN pre-computada por Leiden)
+    for i in invoices:
+        for p in payments:
+            if p.id in i.knn_neighbors: 
+                z = m.add_var(var_type=BINARY)
+                m.add_constr(z <= x[i.id])
+                m.add_constr(z <= y[p.id])
+                # En mip las expresiones se construyen algebraicamente
+                obj_score += z * i.similarity(p) * 10.0
+
+    # Penalizacion Lineal y Desempate
+    penalty = delta_abs * 5000.0
+    density_bonus = (xsum(x.values()) + xsum(y.values())) * 0.05
+
+    m.objective = MAXIMIZE(obj_score - penalty + density_bonus)
+    
+    status = m.optimize()
+    return extract_solution(m) if status == OptimizationStatus.OPTIMAL else None
+\end{lstlisting}
+
+\section{Topología de Flujo de Datos}
+
+El diagrama ilustra la arquitectura de filtrado agresivo y segmentación inteligente.
+
+\begin{center}
+\begin{tikzpicture}[node distance=1.8cm, auto]
+    % Estilos
+    \tikzstyle{proc} = [rectangle, draw, fill=blue!10, text width=12em, text centered, rounded corners, minimum height=3em, drop shadow, font=\small\bfseries]
+    \tikzstyle{db} = [cylinder, draw, shape border rotate=90, aspect=0.25, fill=gray!10, text width=4em, text centered, minimum height=3em, font=\scriptsize]
+    \tikzstyle{decision} = [diamond, draw, fill=green!5, text width=5em, text centered, font=\scriptsize]
+    \tikzstyle{line} = [draw, -latex', thick]
+
+    % Nodos
+    \node [db] (ledger) {Ledger $\mathbb{Z}$};
+    
+    \node [proc, right of=ledger, node distance=4cm] (t0) {\textbf{Tier 0: Safe Peeling}\\(Uniqueness Check)};
+    
+    \node [proc, below of=t0, node distance=2.5cm] (t1) {Tier 1: Multi-Pass\\(Expanding Window)};
+    
+    \node [proc, below of=t1, node distance=2.5cm] (graph) {\textbf{Tier 2: Leiden Graph}\\(Modular Clustering)};
+    
+    \node [decision, below of=graph, node distance=2.5cm] (partition) {Cluster Size?};
+    
+    \node [proc, left of=partition, node distance=4cm] (solver) {\textbf{Linear MILP}\\(Stratified Safety)};
+    \node [proc, right of=partition, node distance=4cm] (greedy) {Greedy Heuristic};
+
+    \node [db, below of=partition, node distance=4cm] (final) {Commited State\\(Optimistic)};
+
+    % Conexiones
+    \path [line] (ledger) -- (t0);
+    \path [line] (t0) -- node [right] {Ambiguous} (t1);
+    \path [line] (t0) -| (final);
+    
+    \path [line] (t1) -- node [right] {Residuals} (graph);
+    
+    \path [line] (graph) -- (partition);
+    
+    \path [line] (partition) -- node [above] {$\le 80$} (solver);
+    \path [line] (partition) -- node [above] {$> 80$} (greedy);
+    
+    \path [line] (solver) |- (final);
+    \path [line] (greedy) |- (final);
+
+\end{tikzpicture}
+\end{center}
+
+\end{document}

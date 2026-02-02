@@ -1,0 +1,210 @@
+\documentclass[11pt, a4paper]{article}
+
+% --- Configuración Global ---
+\usepackage[utf8]{inputenc}
+\usepackage[spanish, es-tabla]{babel}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+
+% --- Matemáticas y Algoritmos ---
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{mathtools}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+% --- Gráficos y Código ---
+\usepackage{tikz}
+\usetikzlibrary{shapes,arrows,positioning,calc,fit,shadows}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{fancyhdr}
+\usepackage{hyperref}
+
+% --- Estilos de Código ---
+\definecolor{codegreen}{rgb}{0,0.5,0}
+\definecolor{codeblue}{rgb}{0.0,0.3,0.7}
+\definecolor{backcolour}{rgb}{0.97,0.97,0.98}
+\definecolor{codeorange}{rgb}{0.8,0.4,0}
+
+\lstdefinestyle{techspec}{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{codeblue}\bfseries,
+    ndkeywordstyle=\color{codeorange}\bfseries,
+    numberstyle=\tiny\color{gray},
+    basicstyle=\ttfamily\footnotesize,
+    breaklines=true,                
+    frame=single,
+    rulecolor=\color{gray!20},
+    captionpos=b,
+    showstringspaces=false
+}
+\lstset{style=techspec}
+
+% --- Encabezados ---
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\textbf{Deep-Accountant Core}}
+\lhead{Arquitectura Unificada / V9.3 Production}
+\cfoot{\thepage}
+
+\title{
+    \vspace{-2cm}
+    \textbf{\huge Especificación Técnica: Motor de Conciliación Híbrido V9.3}\\
+    \large Integer-MILP con Causalidad Temporal y Parsimonia Cardinal
+}
+\author{\textbf{División de Ingeniería de Sistemas Financieros}}
+\date{Enero 2026 | Production Standard}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Este documento define la arquitectura definitiva para sistemas de conciliación financiera "Zero-Error". La metodología implementa un modelo de \textbf{Programación Entera (Integer Programming)} que sustituye la aritmética de punto flotante. Se introduce un solver MILP avanzado que distingue tripartitamente entre: errores técnicos ($\delta$), saldos remanentes por parcialidad ($r_i$) y tolerancias operativas bancarias ($\gamma$). El sistema incorpora restricciones de "Causalidad Temporal" para evitar falsos positivos anacrónicos y una penalización de "Navaja de Ockham" para priorizar soluciones de baja cardinalidad.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Principios Axiomáticos del Sistema}
+
+La arquitectura V9.3 establece invariantes de diseño para entornos financieros críticos, asegurando consistencia matemática y viabilidad operativa.
+
+\begin{enumerate}
+    \item \textbf{Anti-Greedy Theft (Validación Ortogonal):} El emparejamiento determinista basado únicamente en montos y tiempo está estrictamente prohibido. La aceptación automática requiere confirmación secundaria ortogonal (Referencia, ID Fiscal o Entidad).
+    \item \textbf{Aritmética Entera Estricta (Integer-MILP):} Se prohíbe el uso de punto flotante ($\mathbb{R}$). Todo monto opera en $\mathbb{Z}$ (centavos/satoshi), eliminando tolerancias artificiales por representación binaria.
+    \item \textbf{Penalización de la Complejidad (Sparsity & Parsimony):} El sistema prefiere no conciliar antes que fragmentar un pago innecesariamente. Se penaliza la alta cardinalidad (combinar muchas facturas para explicar un solo pago) para evitar el problema de la suma de subconjuntos (*Subset Sum Problem*).
+    \item \textbf{Distinción Tripartita del Residuo:} El modelo matemático diferencia explícitamente entre:
+    \begin{itemize}
+        \item \textit{Error Técnico} ($\delta$): Fallo de integridad (Penalización Máxima).
+        \item \textit{Saldo Remanente} ($r_i$): Deuda viva legítima (Penalización Media + Costo Fijo).
+        \item \textit{Gap Operativo} ($\gamma$): Diferencias minúsculas por comisiones o tipo de cambio (Permitido bajo umbral estricto y fijo).
+    \end{itemize}
+\end{enumerate}
+
+\section{Subsistema de Ingesta: Inferencia Combinatoria Restringida}
+
+El riesgo de alucinación matemática se elimina imponiendo una **Precedencia Visual Estricta**.
+
+\subsection{Normalización al Dominio Entero ($\mathbb{Z}$)}
+Antes de cualquier operación, se aplica la transformación:
+$$ Val_{\mathbb{Z}}(t) = \text{Round}(Val_{\mathbb{R}}(t) \cdot 10^k) $$
+Donde $k$ es la precisión de la divisa. Todas las operaciones subsecuentes ocurren en el anillo de los enteros.
+
+\subsection{Grafo de Hipótesis con Filtro de Kerning}
+Generamos un grafo $G_f$ donde una arista de fusión $e_{ij}$ existe solo si:
+\begin{equation}
+    \Delta x(t_i, t_j) \le \kappa \cdot \max(h(t_i), h(t_j)) \quad \text{AND} \quad \text{Row}(t_i) \equiv \text{Row}(t_j)
+\end{equation}
+La confianza de una fusión se modela asimétricamente. Si la confianza visual es absoluta ($Conf > 0.95$), el sistema tiene prohibido corregir la lectura, incluso si impide el balance.
+
+\section{Pipeline de Procesamiento: Estratificación Resiliente}
+
+La arquitectura clasifica los datos por entropía y aplica solvers de complejidad creciente.
+
+\subsection{Fase 0: Safe Peeling Ortogonal (High-Confidence)}
+Esta fase reduce la dimensionalidad mediante commits automáticos. La condición de aceptación exige:
+
+\begin{equation}
+    Match(i, j) \to \text{Commit} \iff 
+    \begin{cases} 
+      Amount(i) = Amount(j) \\
+      Count(Amount)_{\Delta t} = 1 \\
+      \textbf{Sim}_{text}(Ref_i, Ref_j) > \tau_{id} \quad (\text{Validación Ortogonal})
+    \end{cases}
+\end{equation}
+Sin coincidencia textual, el par pasa obligatoriamente al motor MILP.
+
+\subsection{Fase 1: Segmentación Modular (Leiden) con Hard-Stop}
+Se construye un grafo de afinidad ponderada para agrupar transacciones. Si un clúster resulta inviable bajo las restricciones de negocio, se activa el **Rescue Loop**.
+
+\subsection{Mecanismo de Feedback por Detección de Error ($\delta$)}
+A diferencia de los sistemas tradicionales que buscan "Infeasibility", este modelo siempre converge gracias a la variable de holgura de error ($\delta$). El disparador de rescate se activa por **Costo de Integridad**:
+
+Si la solución óptima $S^*$ implica $\delta_{abs} > 0$:
+1. Se asume que falta información en el clúster actual.
+2. Se identifican clústeres adyacentes $C_{adj}$.
+3. Se genera un Super-Clúster $C_{new} = C_k \cup C_{adj}$.
+4. \textbf{Hard-Stop de Seguridad:}
+\begin{equation}
+    \text{Si } |C_{new}| > N_{max} \implies \text{Abortar Automatización} \to \text{Cola Manual}
+\end{equation}
+Esto previene la explosión exponencial de tiempos de cómputo (NP-Hardness) y asegura que el sistema no "invente" balances forzados.
+
+\section{Motor de Resolución Unificado: Integer-MILP con Parsimonia}
+
+Núcleo matemático que opera sobre enteros, modelando explícitamente la parcialidad, la causalidad temporal y la navaja de Ockham.
+
+\subsection{Variables de Decisión (Dominio $\mathbb{Z}$)}
+Sea un clúster $C = (U \cup V, E)$ donde $U$ son facturas (Debts) y $V$ son pagos (Credits).
+
+\begin{itemize}
+    \item $x_{i,k} \in \{0,1\}$: Selección de la hipótesis $k$ de la factura $i$.
+    \item $y_{j,l} \in \{0,1\}$: Selección de la hipótesis $l$ del pago $j$.
+    \item $r_{i,k} \in \mathbb{Z}_{\ge 0}$: \textbf{Saldo Remanente} de la factura $i$.
+    \item $\beta_{i,k} \in \{0,1\}$: \textbf{Indicador de Parcialidad}. Vale 1 si $r_{i,k} > 0$.
+    \item $\gamma \in \mathbb{Z}$: \textbf{Gap Operativo} (Write-off bancario/cambiario).
+    \item $\delta_{abs} \in \mathbb{Z}_{\ge 0}$: Error técnico (Ajuste prohibido).
+\end{itemize}
+
+\subsection{Restricciones Estructurales (Hard Constraints)}
+
+\textbf{1. Balance Financiero con Tolerancia Operativa}
+La suma de pagos cubre las facturas seleccionadas, menos el remanente, más el gap operativo permitido.
+\begin{equation}
+    \sum_{i,k} (x_{i,k} Val_{i,k} - r_{i,k}) - \sum_{j,l} (y_{j,l} Val_{j,l}) + \gamma + \delta_{pos} - \delta_{neg} = 0
+\end{equation}
+
+\textbf{2. Causalidad Temporal (Prevención de Anacronismo)}
+Un pago no puede liquidar una obligación futura fuera de una ventana lógica de negocio. Se prohíbe el emparejamiento si la fecha del pago precede a la factura más allá de un buffer de anticipo permitido.
+\begin{equation}
+    \forall (i, j): \text{Date}(y_j) < \text{Date}(x_i) - \epsilon_{days} \implies x_{i,k} + y_{j,l} \le 1
+\end{equation}
+
+\textbf{3. Restricción de Gap Operativo ($\gamma$)}
+El gap operativo es un límite fijo por evento de conciliación, independiente del número de facturas, evitando la acumulación de tolerancias.
+\begin{equation}
+    |\gamma| \le T_{fixed\_threshold}
+\end{equation}
+
+\textbf{4. Consistencia y Activación de Parcialidad (Big-M)}
+\begin{equation}
+    r_{i,k} \le x_{i,k} \cdot Val_{i,k} 
+\end{equation}
+\begin{equation}
+    r_{i,k} \le M \cdot \beta_{i,k}
+\end{equation}
+
+\subsection{Función Objetivo Jerarquizada (Navaja de Ockham)}
+
+Maximizamos $Z$ penalizando el error, la parcialidad y, crucialmente, la \textbf{complejidad cardinal} ($\Psi$) para evitar soluciones sobre-ajustadas.
+
+\begin{equation}
+    \max Z = \underbrace{\sum (z \cdot W_{sem})}_{\text{Match Textual}} 
+    - \underbrace{\Omega \cdot \delta_{abs}}_{\text{Error Técnico}} 
+    - \underbrace{\Lambda \sum \beta_{i,k}}_{\text{Costo Parcialidad}}
+    - \underbrace{\Psi \sum x_{i,k}}_{\text{Costo Complejidad}}
+    - \underbrace{\Gamma \cdot |\gamma|}_{\text{Costo Gap}}
+    - \underbrace{\Phi \sum r_{i,k}}_{\text{Monto Pendiente}}
+\end{equation}
+
+\textbf{Calibración de Pesos ($\Omega \gg \Lambda \gg \Psi \gg \Gamma \gg \Phi$):}
+\begin{itemize}
+    \item $\Omega$: Prohibición de $\delta$. El sistema prefiere no hacer nada antes que violar la integridad.
+    \item $\Psi$ (Parsimonia): Costo por cada factura adicional incluida en el match. Ante dos soluciones matemáticamente válidas, el sistema elige la que involucra menos documentos.
+    \item $\Gamma$: Se prefiere un pequeño "Write-off" operativo ($\gamma$) para cerrar una factura, antes que arrastrar un saldo pendiente ínfimo ($r$).
+\end{itemize}
+
+\section{Conclusión de la Arquitectura}
+
+Esta especificación V9.3 garantiza la estabilidad en producción mediante tres mecanismos de contención:
+1.  **Integridad Temporal:** Bloqueo de emparejamientos anacrónicos mediante restricciones duras.
+2.  **Parsimonia Matemática:** Penalización de cardinalidad ($\Psi$) para eliminar falsos positivos del tipo "Subset Sum".
+3.  **Rescate Inteligente:** Activación de bucles de búsqueda basada en la detección de $\delta > 0$, permitiendo la convergencia incluso en escenarios de datos incompletos sin comprometer la precisión financiera.
+
+\end{document}

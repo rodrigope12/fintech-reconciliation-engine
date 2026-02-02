@@ -1,0 +1,194 @@
+\documentclass[11pt, a4paper]{article}
+
+% --- Configuración Global ---
+\usepackage[utf8]{inputenc}
+\usepackage[spanish, es-tabla]{babel}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+
+% --- Matemáticas y Algoritmos ---
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsfonts}
+\usepackage{mathtools}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+% --- Gráficos y Código ---
+\usepackage{tikz}
+\usetikzlibrary{shapes,arrows,positioning,calc,fit,shadows}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{fancyhdr}
+\usepackage{hyperref}
+
+% --- Estilos de Código ---
+\definecolor{codegreen}{rgb}{0,0.5,0}
+\definecolor{codeblue}{rgb}{0.0,0.3,0.7}
+\definecolor{backcolour}{rgb}{0.97,0.97,0.98}
+\definecolor{codeorange}{rgb}{0.8,0.4,0}
+
+\lstdefinestyle{techspec}{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{codeblue}\bfseries,
+    ndkeywordstyle=\color{codeorange}\bfseries,
+    numberstyle=\tiny\color{gray},
+    basicstyle=\ttfamily\footnotesize,
+    breaklines=true,                 
+    frame=single,
+    rulecolor=\color{gray!20},
+    captionpos=b,
+    showstringspaces=false
+}
+\lstset{style=techspec}
+
+% --- Encabezados ---
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\textbf{Deep-Accountant Core}}
+\lhead{Módulo de Ingesta / Filtrado Topológico}
+\cfoot{\thepage}
+
+\title{
+    \vspace{-2cm}
+    \textbf{\huge Especificación Técnica: Higiene de Datos V9.4}\\
+    \large Estrategia de Filtrado Topológico de 3 Pilares para OCR Bancario
+}
+\author{\textbf{División de Ingeniería de Sistemas Financieros}}
+\date{Enero 2026 | Propuesta de Optimización}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Este documento define la arquitectura de filtrado y rechazo de ruido para el subsistema de ingesta de documentos PDF (`BankParser`). Se propone un mecanismo de defensa en profundidad basado en tres pivotes axiomáticos: \textbf{Anclaje Temporal Estricto}, \textbf{Firewall Semántico} y \textbf{Validación Geométrica de Columnas}. El objetivo es reducir la tasa de Falsos Positivos de validación algebraica (actualmente 95\%) a niveles cercanos a cero, garantizando que solo tuplas con integridad estructural ingresen al motor de resolución MILP.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{Diagnóstico del Problema Actual}
+
+El análisis de trazas del sistema actual revela una vulnerabilidad crítica en la fase de detección de filas candidatas. El parser actual opera bajo una suposición de \textit{"Greedy Row Consumption"}, ingiriendo cualquier línea que contenga patrones numéricos.
+
+\textbf{Patrones de Fallo Identificados:}
+\begin{itemize}
+    \item \textbf{Alucinación de Marketing:} Textos publicitarios (ej. "Pago para no generar intereses") son interpretados como descripciones de transacción, y sus montos asociados (saldos globales) se capturan como movimientos individuales.
+    \item \textbf{Desbordamiento de Resumen:} Las cajas de resumen al inicio del estado de cuenta violan la estructura columnar esperada pero contienen datos numéricos válidos que corrompen la validación contable.
+    \item \textbf{Ruido de Encabezado/Pie:} Números de página, fechas de impresión y folios fiscales se mezclan con el flujo transaccional.
+\end{itemize}
+
+\section{Arquitectura de Solución: Los 3 Pilares}
+
+Se establece un protocolo de admisión de datos basado en la intersección de tres validadores independientes. Una fila debe satisfacer estrictamente los criterios para ser considerada una transacción ($T_x$).
+
+\subsection{Pilar I: Anclaje Temporal Estricto (Date Anchoring)}
+
+Se elimina la heurística de inferencia de fecha para filas huérfanas, reemplazándola por una regla de \textbf{Cadena de Custodia Temporal}.
+
+\subsubsection{Definición Axiomática}
+Sea $L_i$ una línea de texto extraída y $D(L_i)$ la función de extracción de fecha. Una línea $L_i$ es candidata a inicio de transacción si y solo si:
+
+\begin{equation}
+    \text{IsStart}(L_i) \iff D(L_i) \neq \emptyset
+\end{equation}
+
+Para las líneas subsecuentes $L_{i+k}$ (donde $D(L_{i+k}) = \emptyset$), se permite la asociación a $L_i$ (descripción multi-línea) solo si la distancia vertical visual $\Delta y$ cumple un criterio de adyacencia estricta:
+
+\begin{equation}
+    \text{IsContinuation}(L_{i+k}, L_i) \iff D(L_{i+k}) = \emptyset \land (y_{start}^{i+k} - y_{end}^{i+k-1}) < \epsilon_{line\_spacing}
+\end{equation}
+
+\textbf{Efecto Práctico:}
+Todo texto que aparezca en bloques aislados sin una fecha explícita a su izquierda (comportamiento típico de resúmenes, publicidad y notas al pie) es descartado automáticamente ($Drop(L)$).
+
+\subsection{Pilar II: Firewall Semántico (Banking Jargon Denial-List)}
+
+Se implementa un filtro de rechazo basado en análisis léxico de "Stop Words" bancarias. A diferencia de las "Stop Words" tradicionales (que se eliminan de la cadena), estas palabras actúan como \textbf{Píldoras Venenosas (Poison Pills)}, invalidando la fila completa.
+
+\subsubsection{Conjunto de Rechazo ($\Omega_{deny}$)}
+Se define el conjunto de términos reservados que denotan metadatos y no flujo de efectivo transaccional:
+
+$$ \Omega_{deny} = \{ \text{"CAT", "Tasa", "Interés Anual", "Informativo", "Saldo Promedio", "Línea de Crédito", "Mínimo a Pagar", "Corte"} \} $$
+
+\subsubsection{Algoritmo de Filtrado}
+Para cada línea candidata $L_i$:
+
+\begin{equation}
+    \exists w \in L_i : w \in \Omega_{deny} \implies \text{Purge}(L_i)
+\end{equation}
+
+Este filtro tiene precedencia sobre la detección de montos. Incluso si una línea tiene fecha y monto válidos (ej. "12/01/2026 Saldo al Corte $50,000"), la presencia de "Corte" fuerza su eliminación para evitar duplicar el saldo como un movimiento.
+
+\subsection{Pilar III: Validación Geométrica de Columnas (Spatial Zoning)}
+
+Dado que los documentos PDF preservan coordenadas espaciales, se rechaza la lectura lineal pura (de izquierda a derecha) en favor de una lectura topológica por zonas.
+
+\subsubsection{Detección de Eje Central ($\mu_x$)}
+Se calcula la posición media horizontal ($\mu_{col}$) de los encabezados de columna identificados (CARGO, ABONO, SALDO).
+
+\subsubsection{Criterio de Desviación}
+Sea $x(m)$ la coordenada horizontal del centroide de un bloque numérico candidato a monto. Se define una ventana de aceptación $W_{valid} = [\mu_{col} - \sigma, \mu_{col} + \sigma]$.
+
+\begin{equation}
+    \text{ValidAmount}(m) \iff x(m) \in W_{valid}
+\end{equation}
+
+Cualquier número detectado fuera de esta zona de influencia (ej. un número de teléfono en la columna de descripción, o un folio fiscal en el margen derecho) es degradado a texto plano y excluido de la extracción numérica.
+
+\section{Algoritmo Unificado de Ingesta V9.4}
+
+La integración de los tres pilares se modela en el siguiente algoritmo de paso único.
+
+\begin{algorithm}
+\caption{Ingesta con Filtrado Topológico V9.4}
+\begin{algorithmic}[1]
+\State \textbf{Input:} Raw OCR Pages $P$
+\State \textbf{Output:} Clean Transactions $T$
+\State $T \gets \emptyset$
+\State $CurrentTx \gets \text{Null}$
+
+\For{$page \in P$}
+    \State $\text{Columns} \gets \text{DetectHeaderGeometry}(page)$
+    \For{$line \in page.\text{lines}$}
+        \State \textcolor{codeorange}{\emph{// Pilar II: Firewall Semántico}}
+        \If{$\text{ContainsDenyTokens}(line, \Omega_{deny})$}
+            \State \textbf{continue}
+        \EndIf
+        
+        \State \textcolor{codeorange}{\emph{// Pilar III: Filtrado Geométrico de Montos}}
+        \State $line.\text{amounts} \gets \text{FilterByColumnZone}(line.\text{raw\_numbers}, \text{Columns})$
+        
+        \State \textcolor{codeorange}{\emph{// Pilar I: Anclaje Temporal}}
+        \If{$\text{HasValidDate}(line)$}
+            \If{$CurrentTx \neq \text{Null}$}
+                \State $T.\text{push}(CurrentTx)$
+            \EndIf
+            \State $CurrentTx \gets \text{NewTransaction}(line)$
+        \ElsIf{$CurrentTx \neq \text{Null} \land \text{IsAdjacencyValid}(line, CurrentTx)$}
+            \State $CurrentTx.\text{description} \gets CurrentTx.\text{desc} + " " + line.\text{text}$
+        \Else
+            \State \textbf{discard} $line$ \Comment{Ruido huérfano}
+        \EndIf
+    \EndFor
+\EndFor
+
+\State \Return $T$
+\end{algorithmic}
+\end{algorithm}
+
+\section{Impacto Esperado}
+
+La implementación de esta tríada de validación transformará el perfil de error del sistema:
+
+\begin{itemize}
+    \item \textbf{Reducción de Ruido:} Se estima una eliminación del 95\% de falsos positivos provenientes de secciones informativas.
+    \item \textbf{Recuperación de Integridad:} Al eliminar "basura numérica" (saldos totales interpretados como pagos), la ecuación de balance de la \textit{Validación Algebraica} ($B_n = B_{n-1} + C - D$) podrá cumplirse, elevando la tasa de validación del actual 4\% a niveles operativos ($>90\%$).
+    \item \textbf{Seguridad Contable:} Garantiza que el Solver MILP trabaje sobre datos limpios, reduciendo la necesidad de "Rescate" y aumentando la confianza en los emparejamientos automáticos.
+\end{itemize}
+
+\end{document}
